@@ -1,16 +1,21 @@
 package de.plushnikov.intellij.plugin.intention.valvar.to;
 
+import com.intellij.codeInsight.daemon.impl.quickfix.AddNewArrayExpressionFix;
 import com.intellij.codeInspection.RemoveRedundantTypeArgumentsUtil;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.psi.*;
 import com.intellij.psi.codeStyle.CodeStyleManager;
+import com.intellij.psi.impl.PsiDiamondTypeUtil;
 import com.intellij.psi.util.PsiUtil;
 import com.intellij.refactoring.introduceVariable.IntroduceVariableBase;
+import com.siyeh.ig.psiutils.CommentTracker;
 import de.plushnikov.intellij.plugin.LombokBundle;
 import de.plushnikov.intellij.plugin.intention.valvar.AbstractValVarIntentionAction;
 import org.jetbrains.annotations.Nls;
 import org.jetbrains.annotations.NotNull;
+
+import java.util.Objects;
 
 public abstract class AbstractReplaceExplicitTypeWithVariableIntentionAction extends AbstractValVarIntentionAction {
 
@@ -54,7 +59,7 @@ public abstract class AbstractReplaceExplicitTypeWithVariableIntentionAction ext
     return isAvailableOnDeclarationCustom(context, localVariable);
   }
 
-  protected abstract boolean isAvailableOnDeclarationCustom(@NotNull PsiDeclarationStatement context,@NotNull PsiLocalVariable localVariable);
+  protected abstract boolean isAvailableOnDeclarationCustom(@NotNull PsiDeclarationStatement context, @NotNull PsiLocalVariable localVariable);
 
   @Override
   public void invokeOnDeclarationStatement(PsiDeclarationStatement declarationStatement) {
@@ -79,7 +84,7 @@ public abstract class AbstractReplaceExplicitTypeWithVariableIntentionAction ext
       return;
     }
     PsiJavaCodeReferenceElement referenceElementByFQClassName = elementFactory.createReferenceElementByFQClassName(variableClassName, psiVariable.getResolveScope());
-    typeElement = (PsiTypeElement) IntroduceVariableBase.expandDiamondsAndReplaceExplicitTypeWithVar(typeElement, typeElement);
+    typeElement = (PsiTypeElement) expandDiamondsAndReplaceExplicitTypeWithVar(typeElement, typeElement);
     typeElement.deleteChildRange(typeElement.getFirstChild(), typeElement.getLastChild());
     typeElement.add(referenceElementByFQClassName);
     RemoveRedundantTypeArgumentsUtil.removeRedundantTypeArguments(psiVariable);
@@ -88,4 +93,31 @@ public abstract class AbstractReplaceExplicitTypeWithVariableIntentionAction ext
   }
 
   protected abstract void executeAfterReplacing(PsiVariable psiVariable);
+
+  /**
+   * Ensure that diamond inside initializer is expanded, then replace variable type with var
+   */
+  private PsiElement expandDiamondsAndReplaceExplicitTypeWithVar(PsiTypeElement typeElement, PsiElement context) {
+    PsiElement parent = typeElement.getParent();
+    if (parent instanceof PsiVariable) {
+      PsiExpression copyVariableInitializer = ((PsiVariable) parent).getInitializer();
+      if (copyVariableInitializer instanceof PsiNewExpression) {
+        final PsiDiamondType.DiamondInferenceResult diamondResolveResult =
+          PsiDiamondTypeImpl.resolveInferredTypesNoCheck((PsiNewExpression) copyVariableInitializer, copyVariableInitializer);
+        if (!diamondResolveResult.getInferredTypes().isEmpty()) {
+          PsiDiamondTypeUtil.expandTopLevelDiamondsInside(copyVariableInitializer);
+        }
+      } else if (copyVariableInitializer instanceof PsiArrayInitializerExpression) {
+        new AddNewArrayExpressionFix((PsiArrayInitializerExpression) copyVariableInitializer).doFix();
+      } else if (copyVariableInitializer instanceof PsiFunctionalExpression) {
+        PsiTypeCastExpression castExpression =
+          (PsiTypeCastExpression) JavaPsiFacade.getElementFactory(copyVariableInitializer.getProject())
+            .createExpressionFromText("(" + typeElement.getText() + ")a", copyVariableInitializer);
+        Objects.requireNonNull(castExpression.getOperand()).replace(copyVariableInitializer);
+        copyVariableInitializer.replace(castExpression);
+      }
+    }
+
+    return new CommentTracker().replaceAndRestoreComments(typeElement, JavaPsiFacade.getElementFactory(context.getProject()).createTypeElementFromText("var", context));
+  }
 }
